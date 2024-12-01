@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/notnil/chess"
+	"github.com/notnil/chess/uci"
 	"log"
 	"net"
 	"reseau2TP2/datatypes"
@@ -215,6 +216,34 @@ func handleConnection(c net.Conn) {
 			connectionsMutex.Lock()
 			activeConnections[playerPublicKey] = c
 			connectionsMutex.Unlock()
+		case 0x1D: // JoinSolo
+			log.Println("HostGame")
+			verified := validateSignature(tlv)
+			if !verified {
+				break
+			}
+
+			gameID := uuid.New()
+			//TODO: add collision detection
+			whiteID := getPlayerIDFromSignature(tlv.Value[:])
+			blackID := 0
+			if playerInGame(whiteID) {
+				tlv := datatypes.NewTLV(0x82, []byte("Player already in game"))
+				tlv.Sign(keyPair.PrivateKey)
+				_, err = c.Write(tlv.Encode())
+				if err != nil {
+					log.Fatal(err)
+				}
+				break
+			}
+			createNewGame(gameID.String(), whiteID, blackID)
+
+			tlv = datatypes.NewTLV(0x82, []byte(gameID.String()))
+			tlv.Sign(keyPair.PrivateKey)
+			_, err = c.Write(tlv.Encode())
+			if err != nil {
+				log.Fatal(err)
+			}
 		case 0x1E: // HostGame
 			log.Println("HostGame")
 			verified := validateSignature(tlv)
@@ -369,15 +398,20 @@ func handleConnection(c net.Conn) {
 				break
 			}
 
-			// TODO: check for check, checkmate, stalemate
-
-			tlv = datatypes.NewTLV(0x82, []byte(success))
-			tlv.Sign(keyPair.PrivateKey)
+			var tag uint8 = 0x82
+			if game.Outcome() != chess.NoOutcome {
+				tag = 0x80
+				success = game.FEN()
+			}
 			pbKey, err := getPlayerPublicKey(playerID)
 			if err != nil {
 				log.Println(err)
 				break
 			}
+
+			// Send response to player
+			tlv = datatypes.NewTLV(tag, []byte(success))
+			tlv.Sign(keyPair.PrivateKey)
 			tlv.Encrypt(pbKey)
 			_, err = c.Write(tlv.Encode())
 			if err != nil {
@@ -385,12 +419,57 @@ func handleConnection(c net.Conn) {
 			}
 
 			// TODO: handle playing against AI
+			if blackID, _ := getBlackPlayerID(gameID); blackID == 0 {
+				// AI move
+				eng, err := uci.New("stockfish")
+				if err != nil {
+					panic(err)
+				}
+				defer eng.Close()
+				if game.Outcome() == chess.NoOutcome {
+					if err := eng.Run(uci.CmdUCI, uci.CmdIsReady, uci.CmdUCINewGame); err != nil {
+						panic(err)
+					}
+
+					cmdPos := uci.CmdPosition{Position: game.Position()}
+					cmdGo := uci.CmdGo{MoveTime: 2 * time.Second}
+					if err := eng.Run(cmdPos, cmdGo); err != nil {
+						panic(err)
+					}
+					move := eng.SearchResults().BestMove
+					if err := game.Move(move); err != nil {
+						panic(err)
+					}
+
+					tag = 0x81
+					if game.Outcome() != chess.NoOutcome {
+						tag = 0x80
+						tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
+						tlv.Sign(keyPair.PrivateKey)
+						tlv.Encrypt(pbKey)
+						_, err = c.Write(tlv.Encode())
+						if err != nil {
+							log.Fatal(err)
+						}
+						break
+					}
+
+					tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
+					tlv.Sign(keyPair.PrivateKey)
+					tlv.Encrypt(pbKey)
+					_, err = c.Write(tlv.Encode())
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					break
+				}
+			}
 
 			otherID, _ := getWhitePlayerID(gameID)
 			if currentID == otherID {
 				otherID, _ = getBlackPlayerID(gameID)
 			}
-
 			pbKey, _ = getPlayerPublicKey(otherID)
 			conn, err := getConnectionForPlayer(pbKey)
 			if err != nil {
@@ -398,7 +477,20 @@ func handleConnection(c net.Conn) {
 				break
 			}
 
-			tlv = datatypes.NewTLV(0x81, []byte(game.FEN()))
+			tag = 0x81
+			if game.Outcome() != chess.NoOutcome {
+				tag = 0x80
+				tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
+				tlv.Sign(keyPair.PrivateKey)
+				tlv.Encrypt(pbKey)
+				_, err = conn.Write(tlv.Encode())
+				if err != nil {
+					log.Fatal(err)
+				}
+				break
+			}
+
+			tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
 			tlv.Sign(keyPair.PrivateKey)
 			tlv.Encrypt(pbKey)
 			_, err = conn.Write(tlv.Encode())

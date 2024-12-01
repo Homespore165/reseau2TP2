@@ -19,7 +19,7 @@ func main() {
 
 	time.Sleep(100 * time.Millisecond)
 
-	c1, err := client.Init("./client/config1.json")
+	c1, err := client.Init("./client/config1.json", 1)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -28,9 +28,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	c1.HostGame()
 
-	c2, err := client.Init("./client/config2.json")
+	c2, err := client.Init("./client/config2.json", 2)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -39,21 +38,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	games := c2.GetAvailableGames()
-	if len(games) != 0 {
-		c2.JoinGame(games[0])
-	} else {
-		log.Println("Already joined game")
-	}
-	go c1.PlayMove("g4")
-	go c2.PlayMove("e5")
-	// c1.PlayMove("e4")
-	// c2.PlayMove("e5")
-	// c1.PlayMove("Nf3")
-	// c2.PlayMove("Nc6")
-	// c1.PlayMove("Bb5")
-	// c2.PlayMove("a6")
-	// c1.PlayMove("Ba4")
+
+	c1.CLI()
 
 	select {}
 }

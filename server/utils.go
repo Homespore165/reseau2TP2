@@ -17,13 +17,5 @@ func parseAlgebraicNotation(move *chess.Move, board *chess.Board) (string, error
 		capture = "x"
 	}
 
-	tag := ""
-	if move.HasTag(chess.Check) {
-		tag = "+"
-	}
-	if move.HasTag(chess.MoveTag(chess.Checkmate)) {
-		tag = "#"
-	}
-
-	return piece + capture + move.S2().String() + tag, nil
+	return piece + capture + move.S2().String(), nil
 }

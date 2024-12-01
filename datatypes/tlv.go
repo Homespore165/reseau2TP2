@@ -183,6 +183,9 @@ func (t *TLV) Decrypt(privateKey string) error {
 	// Decrypt the AES key
 	aesKey, err := rsa.DecryptPKCS1v15(rand.Reader, parsedKey, t.Value[:encryptedKeySize])
 	if err != nil {
+		// TODO: fix here
+		log.Println(t.Tag)
+		log.Println(string(t.Value))
 		return err
 	}
 
