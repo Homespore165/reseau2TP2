@@ -1,8 +1,10 @@
 package datatypes
 
 import (
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	_ "strings"
@@ -42,9 +44,19 @@ func GenerateKeyPair() (KeyPair, error) {
 	}, nil
 }
 
-//
-// func IsolateKey(key string) string {
-// 	lines := strings.Split(key, "\n")
-// 	isolatedKey := strings.Join(lines[1:len(lines)-2], "\n")
-// 	return "-----BEGIN RSA PUBLIC KEY-----\n" + isolatedKey + "\n-----END RSA PUBLIC KEY-----\n"
-// }
+func VerifySignature(signature []byte, key string) bool {
+	block, _ := pem.Decode([]byte(key))
+	if block == nil {
+		return false
+	}
+	parsedKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return false
+	}
+	hashed := sha256.Sum256(signature[:len(signature)-256-1])
+	err = rsa.VerifyPKCS1v15(parsedKey.(*rsa.PublicKey), crypto.SHA256, hashed[:], signature[len(signature)-256:])
+	if err != nil {
+		return false
+	}
+	return true
+}

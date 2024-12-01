@@ -2,12 +2,15 @@ package datatypes
 
 import (
 	"crypto"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"io"
 	"log"
 	"strings"
 )
@@ -98,4 +101,120 @@ func (t *TLV) Verify(publicKey string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func (t *TLV) Encrypt(publicKey string) error {
+	// Decode the public key
+	block, _ := pem.Decode([]byte(publicKey))
+	if block == nil {
+		return errors.New("failed to decode public key")
+	}
+
+	// Parse the public key
+	parsedKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return err
+	}
+
+	// Type assert to RSA public key
+	rsaPublicKey, ok := parsedKey.(*rsa.PublicKey)
+	if !ok {
+		return errors.New("not an RSA public key")
+	}
+
+	// Generate an AES key
+	aesKey := make([]byte, 32)
+	if _, err := rand.Read(aesKey); err != nil {
+		return err
+	}
+
+	// Encrypt the AES key with the RSA public key
+	encryptedKey, err := rsa.EncryptPKCS1v15(rand.Reader, rsaPublicKey, aesKey)
+	if err != nil {
+		return err
+	}
+
+	// Encrypt the value with AES
+	cipherBlock, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return err
+	}
+
+	gcm, err := cipher.NewGCM(cipherBlock)
+	if err != nil {
+		return err
+	}
+
+	// Generate a random nonce
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return err
+	}
+
+	// Encrypt the value
+	encryptedValue := gcm.Seal(nonce, nonce, t.Value, nil)
+
+	// Combine encrypted key and encrypted value
+	t.Value = append(encryptedKey, encryptedValue...)
+	t.Length = len(t.Value)
+
+	return nil
+}
+
+func (t *TLV) Decrypt(privateKey string) error {
+	// Decode the private key
+	block, _ := pem.Decode([]byte(privateKey))
+	if block == nil {
+		return errors.New("failed to decode private key")
+	}
+
+	// Parse the private key
+	parsedKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return err
+	}
+
+	// Extract the encrypted AES key (assuming it's the first 256 bytes for a 2048-bit key)
+	encryptedKeySize := 256
+	if len(t.Value) < encryptedKeySize {
+		return errors.New("insufficient data for decryption")
+	}
+
+	// Decrypt the AES key
+	aesKey, err := rsa.DecryptPKCS1v15(rand.Reader, parsedKey, t.Value[:encryptedKeySize])
+	if err != nil {
+		return err
+	}
+
+	// Create AES cipher
+	cipherBlock, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return err
+	}
+
+	gcm, err := cipher.NewGCM(cipherBlock)
+	if err != nil {
+		return err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(t.Value) < encryptedKeySize+nonceSize {
+		return errors.New("ciphertext too short")
+	}
+
+	// Extract nonce and ciphertext
+	nonce := t.Value[encryptedKeySize : encryptedKeySize+nonceSize]
+	ciphertext := t.Value[encryptedKeySize+nonceSize:]
+
+	// Decrypt the value
+	decryptedValue, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return err
+	}
+
+	// Update TLV with decrypted value
+	t.Value = decryptedValue
+	t.Length = len(decryptedValue)
+
+	return nil
 }
