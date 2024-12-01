@@ -182,6 +182,14 @@ func (c *Client) Send(message datatypes.TLV) error {
 	return nil
 }
 
+func (c *Client) SendTCP(message string) error {
+	_, err := c.conn.Write([]byte(message + "\n"))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *Client) Receive() (datatypes.TLV, error) {
 	reader := bufio.NewReader(c.conn)
 	line, err := reader.ReadBytes('\n')
@@ -192,7 +200,6 @@ func (c *Client) Receive() (datatypes.TLV, error) {
 	if err != nil {
 		c.logger.Fatal(err)
 	}
-	c.logger.Println("Received tag: ", r.Tag)
 	return r, nil
 }
 
@@ -506,8 +513,199 @@ func (c *Client) CLI() {
 		Items: items,
 	}
 
-	_, _, err := prompt.Run()
+	_, result, err := prompt.Run()
 	if err != nil {
 		c.logger.Fatal(err)
 	}
+
+	switch result {
+	case "Login":
+		c.loginCLI()
+	case "Host game":
+		c.HostGame()
+		c.CLI()
+	case "Join solo":
+		c.JoinSolo()
+		c.CLI()
+	case "Join game":
+		c.joinGameCLI()
+	case "Get available games":
+		c.getAvailableGamesCLI()
+	case "Play move":
+		c.playMoveCLI()
+	case "Get available moves":
+		c.getAvailableMovesCLI()
+	case "Quit":
+		c.Close()
+	}
+}
+
+func (c *Client) loginCLI() {
+	if c.isLoggedIn {
+		fmt.Println("Already logged in")
+		return
+	}
+
+	firstNamePrompt := promptui.Prompt{
+		Label: "First name",
+	}
+	firstName, err := firstNamePrompt.Run()
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+
+	lastNamePrompt := promptui.Prompt{
+		Label: "Last name",
+	}
+	lastName, err := lastNamePrompt.Run()
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+
+	eloPrompt := promptui.Prompt{
+		Label: "Elo",
+		Validate: func(s string) error {
+			_, err := strconv.Atoi(s)
+			if err != nil {
+				return errors.New("Invalid number")
+			}
+			return nil
+		},
+	}
+	elo, err := eloPrompt.Run()
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+	eloInt, err := strconv.Atoi(elo)
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+
+	user := datatypes.NewUser(firstName, lastName, true, eloInt, c.KeyPair.PublicKey)
+	err = c.Login(*user)
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+	c.CLI()
+}
+
+func (c *Client) joinGameCLI() {
+	if !c.isLoggedIn {
+		fmt.Println("Not logged in")
+		return
+	}
+
+	gameIDPrompt := promptui.Prompt{
+		Label: "Game ID",
+	}
+	gameID, err := gameIDPrompt.Run()
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+	gameIDUUID, err := uuid.Parse(gameID)
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+
+	c.JoinGame(gameIDUUID)
+}
+
+func (c *Client) getAvailableGamesCLI() {
+	if !c.isLoggedIn {
+		fmt.Println("Not logged in")
+		return
+	}
+
+	games := c.GetAvailableGames()
+	gamesID := make([]string, len(games))
+	for _, game := range games {
+		gamesID = append(gamesID, game.String())
+	}
+	gamesID = gamesID[1:]
+	prompt := promptui.Select{
+		Label: "Select a game",
+		Items: gamesID,
+	}
+
+	_, result, err := prompt.Run()
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+
+	gameID, err := uuid.Parse(result)
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+
+	c.JoinGame(gameID)
+	c.CLI()
+}
+
+func (c *Client) playMoveCLI() {
+	if !c.isLoggedIn {
+		fmt.Println("Not logged in")
+		return
+	}
+
+	if !c.inGame {
+		fmt.Println("Not in a game")
+		return
+	}
+
+	if c.awaitingMove {
+		fmt.Println("Awaiting move")
+		c.CLI()
+	}
+
+	movePrompt := promptui.Prompt{
+		Label: "Move",
+	}
+	move, err := movePrompt.Run()
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+
+	c.PlayMove(move)
+	c.CLI()
+}
+
+func (c *Client) getAvailableMovesCLI() {
+	if !c.isLoggedIn {
+		fmt.Println("Not logged in")
+		return
+	}
+
+	if !c.inGame {
+		fmt.Println("Not in a game")
+		return
+	}
+
+	if c.awaitingMove {
+		fmt.Println("Awaiting move")
+		c.CLI()
+	}
+
+	moves := c.GetAvailableMoves()
+	fmt.Println("Available moves:")
+	for _, move := range moves {
+		fmt.Println(move)
+	}
+	if len(moves) == 0 {
+		fmt.Println("No available moves")
+		c.CLI()
+		return
+	}
+
+	prompt := promptui.Select{
+		Label: "Select a move",
+		Items: moves,
+	}
+
+	_, result, err := prompt.Run()
+	if err != nil {
+		c.logger.Fatal(err)
+	}
+
+	c.PlayMove(result)
+	c.CLI()
 }

@@ -30,16 +30,9 @@ func main() {
 	}
 
 	c2, err := client.Init("./client/config2.json", 2)
-	if err != nil {
-		log.Fatal(err)
-	}
-	user2 := datatypes.NewUser("Jane", "Doe", true, 1500, c2.KeyPair.PublicKey)
-	err = c2.Login(*user2)
-	if err != nil {
-		log.Fatal(err)
-	}
 
-	c1.CLI()
+	c1.HostGame()
+	c2.CLI()
 
 	select {}
 }
