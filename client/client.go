@@ -20,6 +20,7 @@ import (
 type Client struct {
 	configFile      string
 	conn            net.Conn
+	connUDP         net.UDPConn
 	KeyPair         datatypes.KeyPair
 	ServerPublicKey string
 	isLoggedIn      bool
@@ -28,6 +29,7 @@ type Client struct {
 	moveWaitCancel  chan struct{}
 	awaitingMove    bool
 	logger          *log.Logger
+	mode            string
 }
 
 func Init(configFile string, i int) (Client, error) {
@@ -36,10 +38,20 @@ func Init(configFile string, i int) (Client, error) {
 		return Client{}, err
 	}
 
+	udpServer, err := net.ResolveUDPAddr("udp", "localhost:8081")
+	if err != nil {
+		return Client{}, err
+	}
+	connUDP, err := net.DialUDP("udp", nil, udpServer)
+	if err != nil {
+		return Client{}, err
+	}
+
 	logger := log.New(os.Stdout, fmt.Sprintf("Client %d: ", i), log.LstdFlags)
 	client := Client{
 		configFile:     configFile,
 		conn:           conn,
+		connUDP:        *connUDP,
 		moveMutex:      &sync.Mutex{},
 		moveWaitCancel: make(chan struct{}),
 		logger:         logger,
@@ -57,6 +69,7 @@ func Init(configFile string, i int) (Client, error) {
 	client.KeyPair = keyPair
 
 	client.ServerPublicKey = client.getConfig("ServerPublicKey")
+	client.mode = client.getConfig("protocol")
 
 	return client, nil
 }
@@ -117,6 +130,15 @@ func (c *Client) setConfig(path string, value interface{}) {
 	}
 }
 
+func (c *Client) RejoinWhite() {
+	c.inGame = true
+}
+
+func (c *Client) RejoinBlack() {
+	c.inGame = true
+	go c.awaitMove()
+}
+
 func (c *Client) getConfig(path string) string {
 	json, err := os.ReadFile(c.configFile)
 	if err != nil {
@@ -175,6 +197,14 @@ func (c *Client) awaitMove() {
 }
 
 func (c *Client) Send(message datatypes.TLV) error {
+	if c.mode == "tcp" {
+		return c.SendTCP(message)
+	} else {
+		return c.SendUDP(message)
+	}
+}
+
+func (c *Client) SendTCP(message datatypes.TLV) error {
 	_, err := c.conn.Write(message.Encode())
 	if err != nil {
 		return err
@@ -182,8 +212,8 @@ func (c *Client) Send(message datatypes.TLV) error {
 	return nil
 }
 
-func (c *Client) SendTCP(message string) error {
-	_, err := c.conn.Write([]byte(message + "\n"))
+func (c *Client) SendUDP(message datatypes.TLV) error {
+	_, err := c.connUDP.Write(message.Encode())
 	if err != nil {
 		return err
 	}
@@ -191,6 +221,14 @@ func (c *Client) SendTCP(message string) error {
 }
 
 func (c *Client) Receive() (datatypes.TLV, error) {
+	if c.mode == "tcp" {
+		return c.ReceiveTCP()
+	} else {
+		return c.ReceiveUDP()
+	}
+}
+
+func (c *Client) ReceiveTCP() (datatypes.TLV, error) {
 	reader := bufio.NewReader(c.conn)
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
@@ -203,16 +241,17 @@ func (c *Client) Receive() (datatypes.TLV, error) {
 	return r, nil
 }
 
-func (c *Client) Close() {
-	c.conn.Close()
+func (c *Client) ReceiveUDP() (datatypes.TLV, error) {
+	b := make([]byte, 1024)
+	_, err := c.connUDP.Read(b)
+	if err != nil {
+		return datatypes.TLV{}, err
+	}
+	return datatypes.Decode(b)
 }
 
-func (c *Client) Open() {
-	conn, err := net.Dial("tcp", "localhost:8080")
-	if err != nil {
-		c.logger.Fatal(err)
-	}
-	c.conn = conn
+func (c *Client) Close() {
+	c.conn.Close()
 }
 
 func (c *Client) Login(user datatypes.User) error {
@@ -438,6 +477,7 @@ func (c *Client) PlayMove(move string) {
 		c.logger.Println("Move accepted")
 	case 0x83:
 		c.logger.Println("Move rejected")
+		c.awaitingMove = false
 	}
 
 	go c.awaitMove()

@@ -27,12 +27,21 @@ func Init() error {
 	if err != nil {
 		return err
 	}
+
 	go func() {
 		err := tcpManager()
 		if err != nil {
 			log.Fatal(err)
 		}
 	}()
+
+	go func() {
+		err := udpManager()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}()
+
 	keyPair, err = datatypes.GenerateKeyPair()
 	if err != nil {
 		log.Fatal(err)
@@ -53,6 +62,26 @@ func tcpManager() error {
 			return err
 		}
 		go handleConnection(conn)
+	}
+}
+
+func udpManager() error {
+	addr := net.UDPAddr{
+		Port: 8081,
+		IP:   net.ParseIP("127.0.0.1"),
+	}
+	ser, err := net.ListenUDP("udp", &addr)
+	if err != nil {
+		return err
+	}
+	for {
+		p := make([]byte, 2048)
+		_, remoteaddr, err := ser.ReadFromUDP(p)
+		if err != nil {
+			fmt.Printf("Some error %v", err)
+			continue
+		}
+		go handleConnectionUDP(ser, p, remoteaddr)
 	}
 }
 
@@ -146,6 +175,387 @@ func loadGame(gameID string) *chess.Game {
 	return chess.NewGame(game)
 }
 
+func handleConnectionUDP(c *net.UDPConn, buf []byte, addr *net.UDPAddr) {
+	log.SetPrefix("Server: ")
+	var playerPublicKey string
+
+	for {
+		tlv, err := datatypes.Decode(buf)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		_, err = c.WriteToUDP(tlv.Encode(), addr)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		switch tlv.Tag {
+		case 0x00: // Login
+			log.Println("Login")
+			val := strings.Split(string(tlv.Value[:]), ";")
+			fn := val[0]
+			ln := val[1]
+			active := val[2]
+			elo := val[3]
+			key := val[4]
+			eloInt, _ := strconv.Atoi(elo)
+			user := datatypes.User{
+				FirstName: fn,
+				LastName:  ln,
+				IsActive:  active == "1",
+				Elo:       eloInt,
+				PublicKey: key,
+			}
+			if !publicKeyExists(key) {
+				err := createNewUser(&user)
+				if err != nil {
+					log.Fatal(err)
+				}
+			}
+			tlv := datatypes.NewTLV(0x03, []byte(keyPair.PublicKey))
+			_, err = c.WriteToUDP(tlv.Encode(), addr)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			playerPublicKey = key
+
+			connectionsMutex.Lock()
+			activeConnections[playerPublicKey] = c
+			connectionsMutex.Unlock()
+		case 0x1D: // JoinSolo
+			log.Println("JoinSolo")
+			verified := validateSignature(tlv)
+			if !verified {
+				break
+			}
+
+			gameID := uuid.New()
+			whiteID := getPlayerIDFromSignature(tlv.Value[:])
+			blackID := 0
+			if playerInGame(whiteID) {
+				tlv := datatypes.NewTLV(0x82, []byte("Player already in game"))
+				tlv.Sign(keyPair.PrivateKey)
+				_, err = c.Write(tlv.Encode())
+				if err != nil {
+					log.Fatal(err)
+				}
+				break
+			}
+			createNewGame(gameID.String(), whiteID, blackID)
+
+			tlv = datatypes.NewTLV(0x82, []byte(gameID.String()))
+			tlv.Sign(keyPair.PrivateKey)
+			_, err = c.WriteToUDP(tlv.Encode(), addr)
+			if err != nil {
+				log.Fatal(err)
+			}
+		case 0x1E: // HostGame
+			log.Println("HostGame")
+			verified := validateSignature(tlv)
+			if !verified {
+				break
+			}
+
+			gameID := uuid.New()
+			whiteID := getPlayerIDFromSignature(tlv.Value[:])
+			blackID := -1
+			if playerInGame(whiteID) {
+				tlv := datatypes.NewTLV(0x82, []byte("Player already in game"))
+				tlv.Sign(keyPair.PrivateKey)
+				_, err = c.WriteToUDP(tlv.Encode(), addr)
+				if err != nil {
+					log.Fatal(err)
+				}
+				break
+			}
+			createNewGame(gameID.String(), whiteID, blackID)
+
+			tlv = datatypes.NewTLV(0x82, []byte(gameID.String()))
+			tlv.Sign(keyPair.PrivateKey)
+			_, err = c.WriteToUDP(tlv.Encode(), addr)
+			if err != nil {
+				log.Fatal(err)
+			}
+		case 0x1F: // GetAvailableGames
+			log.Println("GetAvailableGames")
+			verified := validateSignature(tlv)
+			if !verified {
+				break
+			}
+
+			gameList := getUnstartedGames()
+			var gameIDs string
+			for _, game := range gameList {
+				gameIDs += game + ";"
+			}
+			tlv = datatypes.NewTLV(0x82, []byte(gameIDs))
+			tlv.Sign(keyPair.PrivateKey)
+			_, err = c.WriteToUDP(tlv.Encode(), addr)
+			if err != nil {
+				log.Fatal(err)
+			}
+		case 0x20: // JoinGame
+			log.Println("JoinSolo")
+			verified := validateSignature(tlv)
+			if !verified {
+				break
+			}
+			val := strings.Split(string(tlv.Value[:]), ";")
+			gameID := val[0]
+			playerID := getPlayerIDFromSignature(tlv.Value[:])
+			if games[uuid.MustParse(gameID)] == nil {
+				if gameExists(gameID) {
+					joinGame(gameID, playerID)
+				}
+			} else {
+				joinGame(gameID, playerID)
+			}
+
+			tlv = datatypes.NewTLV(0x82, []byte(gameID))
+			tlv.Sign(keyPair.PrivateKey)
+			_, err = c.WriteToUDP(tlv.Encode(), addr)
+			if err != nil {
+				log.Fatal(err)
+			}
+		case 0x21: // PlayMove
+			log.Println("PlayMove")
+			err := tlv.Decrypt(keyPair.PrivateKey)
+			if err != nil {
+				log.Println(err)
+			}
+			verified := validateSignature(tlv)
+			if !verified {
+				break
+			}
+
+			playerID := getPlayerIDFromSignature(tlv.Value[:])
+			gameID, err := findActiveGame(playerID)
+			if err != nil {
+				log.Println(err)
+				break
+			}
+			if games[uuid.MustParse(gameID)] == nil {
+				games[uuid.MustParse(gameID)] = loadGame(gameID)
+			}
+
+			game := games[uuid.MustParse(gameID)]
+			pgn := game.String()
+
+			var currentID int
+			if game.Position().Turn() == chess.Black {
+				currentID, err = getBlackPlayerID(gameID)
+				if err != nil {
+					log.Println(err)
+					break
+				}
+
+			} else {
+				currentID, err = getWhitePlayerID(gameID)
+				if err != nil {
+					log.Println(err)
+					break
+				}
+			}
+
+			if currentID != playerID {
+				tlv = datatypes.NewTLV(0x83, []byte("Not your turn"))
+				tlv.Sign(keyPair.PrivateKey)
+				pbKey, err := getPlayerPublicKey(playerID)
+				if err != nil {
+					log.Println(err)
+					break
+				}
+				tlv.Encrypt(pbKey)
+				_, err = c.WriteToUDP(tlv.Encode(), addr)
+				if err != nil {
+					log.Fatal(err)
+				}
+				break
+			}
+
+			success := "Move successful"
+			val := strings.Split(string(tlv.Value[:]), ";")
+			move := val[0]
+			err = game.MoveStr(move)
+			if err != nil {
+				log.Println(err)
+				success = "Invalid move"
+				tlv = datatypes.NewTLV(0x83, []byte(success))
+				tlv.Sign(keyPair.PrivateKey)
+				pbKey, err := getPlayerPublicKey(playerID)
+				if err != nil {
+					log.Println(err)
+					break
+				}
+				tlv.Encrypt(pbKey)
+				_, err = c.WriteToUDP(tlv.Encode(), addr)
+				if err != nil {
+					log.Fatal(err)
+				}
+				break
+			}
+
+			pgn = game.String()
+			err = saveGame(gameID, pgn)
+			if err != nil {
+				log.Println(err)
+				break
+			}
+
+			var tag uint8 = 0x82
+			if game.Outcome() != chess.NoOutcome {
+				tag = 0x80
+				success = game.FEN()
+			}
+			pbKey, err := getPlayerPublicKey(playerID)
+			if err != nil {
+				log.Println(err)
+				break
+			}
+
+			// Send response to player
+			tlv = datatypes.NewTLV(tag, []byte(success))
+			tlv.Sign(keyPair.PrivateKey)
+			tlv.Encrypt(pbKey)
+			_, err = c.WriteToUDP(tlv.Encode(), addr)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			// TODO: handle playing against AI
+			if blackID, _ := getBlackPlayerID(gameID); blackID == 0 {
+				// AI move
+				log.Println("AI move")
+				eng, err := uci.New("stockfish")
+				if err != nil {
+					panic(err)
+				}
+				defer eng.Close()
+				if game.Outcome() == chess.NoOutcome {
+					if err := eng.Run(uci.CmdUCI, uci.CmdIsReady, uci.CmdUCINewGame); err != nil {
+						panic(err)
+					}
+
+					cmdPos := uci.CmdPosition{Position: game.Position()}
+					cmdGo := uci.CmdGo{MoveTime: 2 * time.Second}
+					if err := eng.Run(cmdPos, cmdGo); err != nil {
+						panic(err)
+					}
+					move := eng.SearchResults().BestMove
+					if err := game.Move(move); err != nil {
+						panic(err)
+					}
+
+					tag = 0x81
+					if game.Outcome() != chess.NoOutcome {
+						tag = 0x80
+						tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
+						tlv.Sign(keyPair.PrivateKey)
+						tlv.Encrypt(pbKey)
+						_, err = c.WriteToUDP(tlv.Encode(), addr)
+						if err != nil {
+							log.Fatal(err)
+						}
+						break
+					}
+
+					tlv = datatypes.NewTLV(tag, []byte(game.Position().Board().Draw()))
+					tlv.Sign(keyPair.PrivateKey)
+					tlv.Encrypt(pbKey)
+					_, err = c.WriteToUDP(tlv.Encode(), addr)
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					break
+				}
+			}
+
+			otherID, _ := getWhitePlayerID(gameID)
+			if currentID == otherID {
+				otherID, _ = getBlackPlayerID(gameID)
+			}
+			pbKey, _ = getPlayerPublicKey(otherID)
+			if err != nil {
+				log.Println(err)
+				break
+			}
+
+			tag = 0x81
+			if game.Outcome() != chess.NoOutcome {
+				tag = 0x80
+				tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
+				tlv.Sign(keyPair.PrivateKey)
+				tlv.Encrypt(pbKey)
+				_, err = c.WriteToUDP(tlv.Encode(), addr)
+				if err != nil {
+					log.Fatal(err)
+				}
+				break
+			}
+
+			tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
+			tlv.Sign(keyPair.PrivateKey)
+			tlv.Encrypt(pbKey)
+			_, err = c.WriteToUDP(tlv.Encode(), addr)
+			if err != nil {
+				log.Fatal(err)
+			}
+		case 0x22: // GetAvailableMoves
+			log.Println("GetAvailableMoves")
+			err := tlv.Decrypt(keyPair.PrivateKey)
+			if err != nil {
+				log.Println(err)
+				break
+			}
+			verified := validateSignature(tlv)
+			if !verified {
+				break
+			}
+
+			playerID := getPlayerIDFromSignature(tlv.Value[:])
+			gameID, err := findActiveGame(playerID)
+			if err != nil {
+				log.Println(err)
+				break
+			}
+			if games[uuid.MustParse(gameID)] == nil {
+				games[uuid.MustParse(gameID)] = loadGame(gameID)
+			}
+
+			var moves []string
+			game := games[uuid.MustParse(gameID)]
+			for _, move := range game.ValidMoves() {
+				algebraic, err := parseAlgebraicNotation(move, game.Position().Board())
+				if err != nil {
+					log.Println(err)
+					break
+				}
+
+				moves = append(moves, algebraic)
+			}
+
+			movesString := strings.Join(moves, ";")
+			movesString = strconv.Itoa(len(moves)) + ";" + movesString
+			tlv = datatypes.NewTLV(0x82, []byte(movesString))
+			tlv.Sign(keyPair.PrivateKey)
+			pbKey, err := getPlayerPublicKey(playerID)
+			if err != nil {
+				log.Println(err)
+				break
+			}
+			tlv.Encrypt(pbKey)
+			_, err = c.WriteToUDP(tlv.Encode(), addr)
+			if err != nil {
+				log.Println(err)
+			}
+		}
+	}
+}
+
 func handleConnection(c net.Conn) {
 	log.SetPrefix("Server: ")
 	var playerPublicKey string
@@ -217,14 +627,13 @@ func handleConnection(c net.Conn) {
 			activeConnections[playerPublicKey] = c
 			connectionsMutex.Unlock()
 		case 0x1D: // JoinSolo
-			log.Println("HostGame")
+			log.Println("JoinSolo")
 			verified := validateSignature(tlv)
 			if !verified {
 				break
 			}
 
 			gameID := uuid.New()
-			//TODO: add collision detection
 			whiteID := getPlayerIDFromSignature(tlv.Value[:])
 			blackID := 0
 			if playerInGame(whiteID) {
@@ -234,6 +643,7 @@ func handleConnection(c net.Conn) {
 				if err != nil {
 					log.Fatal(err)
 				}
+
 				break
 			}
 			createNewGame(gameID.String(), whiteID, blackID)
@@ -299,6 +709,17 @@ func handleConnection(c net.Conn) {
 			val := strings.Split(string(tlv.Value[:]), ";")
 			gameID := val[0]
 			playerID := getPlayerIDFromSignature(tlv.Value[:])
+
+			if playerInGame(playerID) {
+				tlv := datatypes.NewTLV(0x82, []byte("Player already in game"))
+				tlv.Sign(keyPair.PrivateKey)
+				_, err = c.Write(tlv.Encode())
+				if err != nil {
+					log.Println(err)
+				}
+				break
+			}
+
 			if games[uuid.MustParse(gameID)] == nil {
 				if gameExists(gameID) {
 					joinGame(gameID, playerID)
@@ -353,6 +774,8 @@ func handleConnection(c net.Conn) {
 				}
 			}
 
+			log.Println("Current ID:", currentID)
+			log.Println("Player ID:", playerID)
 			if currentID != playerID {
 				tlv = datatypes.NewTLV(0x83, []byte("Not your turn"))
 				tlv.Sign(keyPair.PrivateKey)
@@ -401,7 +824,7 @@ func handleConnection(c net.Conn) {
 			var tag uint8 = 0x82
 			if game.Outcome() != chess.NoOutcome {
 				tag = 0x80
-				success = game.FEN()
+				success = game.Position().Board().Draw()
 			}
 			pbKey, err := getPlayerPublicKey(playerID)
 			if err != nil {
@@ -454,12 +877,18 @@ func handleConnection(c net.Conn) {
 						break
 					}
 
-					tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
+					tlv = datatypes.NewTLV(tag, []byte(game.Position().Board().Draw()))
 					tlv.Sign(keyPair.PrivateKey)
 					tlv.Encrypt(pbKey)
 					_, err = c.Write(tlv.Encode())
 					if err != nil {
 						log.Fatal(err)
+					}
+
+					pgn = game.String()
+					err = saveGame(gameID, pgn)
+					if err != nil {
+						log.Println(err)
 					}
 
 					break
@@ -480,7 +909,7 @@ func handleConnection(c net.Conn) {
 			tag = 0x81
 			if game.Outcome() != chess.NoOutcome {
 				tag = 0x80
-				tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
+				tlv = datatypes.NewTLV(tag, []byte(game.Position().Board().Draw()))
 				tlv.Sign(keyPair.PrivateKey)
 				tlv.Encrypt(pbKey)
 				_, err = conn.Write(tlv.Encode())
@@ -490,7 +919,7 @@ func handleConnection(c net.Conn) {
 				break
 			}
 
-			tlv = datatypes.NewTLV(tag, []byte(game.FEN()))
+			tlv = datatypes.NewTLV(tag, []byte(game.Position().Board().Draw()))
 			tlv.Sign(keyPair.PrivateKey)
 			tlv.Encrypt(pbKey)
 			_, err = conn.Write(tlv.Encode())
