@@ -65,18 +65,18 @@ func main() {
 	//c1.CLI()
 
 	//Demo 4
-	// c2.RejoinWhite()
-	// c3.RejoinBlack()
-	// time.Sleep(100 * time.Millisecond)
-	// c2.PlayMove("Ba4")
-	// time.Sleep(100 * time.Millisecond)
-	// c3.PlayMove("b5")
-	// time.Sleep(100 * time.Millisecond)
-	// c2.PlayMove("Bb3")
-	// time.Sleep(100 * time.Millisecond)
-	// c3.PlayMove("Nf6")
-	// time.Sleep(100 * time.Millisecond)
-	// c2.PlayMove("O-O")
+	c2.RejoinWhite()
+	c3.RejoinBlack()
+	time.Sleep(100 * time.Millisecond)
+	c2.PlayMove("Ba4")
+	time.Sleep(100 * time.Millisecond)
+	c3.PlayMove("b5")
+	time.Sleep(100 * time.Millisecond)
+	c2.PlayMove("Bb3")
+	time.Sleep(100 * time.Millisecond)
+	c3.PlayMove("Nf6")
+	time.Sleep(100 * time.Millisecond)
+	c2.PlayMove("O-O")
 
 	select {}
 }
